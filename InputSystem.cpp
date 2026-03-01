@@ -7,6 +7,8 @@
 #include <memory>
 #include <chrono>
 #include <vector>
+#include <set>
+#include <algorithm>
 
 #pragma comment(lib, "user32.lib")
 
@@ -47,6 +49,10 @@ private:
 
     int maxQueueSize = 1024;
 
+    // 跟踪当前按下的键
+    std::set<BYTE> pressedKeys;
+    std::mutex pressedKeysMutex;
+
     // win32u.dll 模块句柄
     HMODULE hWin32u = nullptr;
 
@@ -82,6 +88,35 @@ private:
     InputSystem(const InputSystem&) = delete;
     InputSystem& operator=(const InputSystem&) = delete;
 
+    // 更新按键状态
+    void updateKeyState(BYTE keyCode, BOOL isDown) {
+        std::lock_guard<std::mutex> lock(pressedKeysMutex);
+        if (isDown) {
+            pressedKeys.insert(keyCode);
+        }
+        else {
+            pressedKeys.erase(keyCode);
+        }
+    }
+
+    // 释放所有当前按下的键
+    void releaseAllPressedKeys() {
+        std::set<BYTE> keysToRelease;
+
+        // 获取当前按下的所有键的副本
+        {
+            std::lock_guard<std::mutex> lock(pressedKeysMutex);
+            keysToRelease = pressedKeys;
+            pressedKeys.clear(); // 清空状态
+        }
+
+        // 释放所有按下的键
+        for (auto keyCode : keysToRelease) {
+            sendKeyEventNt(keyCode, FALSE);
+            Sleep(5); // 小延迟确保按键释放顺序
+        }
+    }
+
     // 工作线程 - 负责发送按键
     void workerProc() {
         while (running) {
@@ -102,8 +137,12 @@ private:
                 queueSize = (int)eventQueue.size();
             }
 
-            // ***** 重点：使用 NtUserSendInput 发送按键 *****
+            // 使用 NtUserSendInput 发送按键
             sendKeyEventNt(evt.keyCode, evt.isDown);
+
+            // 更新按键状态
+            updateKeyState(evt.keyCode, evt.isDown);
+
             processedCount++;
 
             // 延迟
@@ -194,6 +233,12 @@ public:
         }
         queueSize = 0;
 
+        // 清空按键状态
+        {
+            std::lock_guard<std::mutex> keysLock(pressedKeysMutex);
+            pressedKeys.clear();
+        }
+
         // 启动工作线程
         workerThread = std::make_unique<std::thread>(&InputSystem::workerProc, this);
 
@@ -229,6 +274,10 @@ public:
         else {
             sendKeyEvent(keyCode, isDown);
         }
+
+        // 更新按键状态
+        updateKeyState(keyCode, isDown);
+
         return 0;
     }
 
@@ -244,6 +293,7 @@ public:
             else {
                 sendKeyEvent(key, TRUE);
             }
+            updateKeyState(key, TRUE);
             Sleep(delayBetweenMs);
         }
 
@@ -255,6 +305,7 @@ public:
             else {
                 sendKeyEvent(*it, FALSE);
             }
+            updateKeyState(*it, FALSE);
             Sleep(delayBetweenMs);
         }
 
@@ -283,6 +334,7 @@ public:
                 else {
                     sendKeyEvent(VK_SHIFT, TRUE);
                 }
+                updateKeyState(VK_SHIFT, TRUE);
             }
 
             if (NtUserSendInput) {
@@ -293,6 +345,8 @@ public:
                 sendKeyEvent(keyCode, TRUE);
                 sendKeyEvent(keyCode, FALSE);
             }
+            updateKeyState(keyCode, TRUE);
+            updateKeyState(keyCode, FALSE);
 
             if (shiftState & 1) {
                 if (NtUserSendInput) {
@@ -301,6 +355,7 @@ public:
                 else {
                     sendKeyEvent(VK_SHIFT, FALSE);
                 }
+                updateKeyState(VK_SHIFT, FALSE);
             }
 
             Sleep(10); // 字符间延迟
@@ -322,13 +377,26 @@ public:
         return 0;
     }
 
-    // 清空队列
+    // 清空队列 - 修复版本：确保释放所有按下的键
     void clearQueue() {
-        std::lock_guard<std::mutex> lock(queueMutex);
-        while (!eventQueue.empty()) {
-            eventQueue.pop();
+        // 首先暂停处理
+        bool wasProcessing = processing;
+        processing = false;
+
+        // 清空队列
+        {
+            std::lock_guard<std::mutex> lock(queueMutex);
+            while (!eventQueue.empty()) {
+                eventQueue.pop();
+            }
+            queueSize = 0;
         }
-        queueSize = 0;
+
+        // 释放所有当前按下的键
+        releaseAllPressedKeys();
+
+        // 恢复处理状态
+        processing = wasProcessing;
     }
 
     // 获取状态
@@ -351,16 +419,35 @@ public:
             workerThread->join();
             workerThread.reset();
         }
+
+        // 确保所有按键被释放
+        releaseAllPressedKeys();
     }
 
     // 紧急停止
     void emergencyStop() {
-        clearQueue();
+        // 清空队列
+        {
+            std::lock_guard<std::mutex> lock(queueMutex);
+            while (!eventQueue.empty()) {
+                eventQueue.pop();
+            }
+            queueSize = 0;
+        }
+
+        // 释放所有按下的键
+        releaseAllPressedKeys();
     }
 
     // 检查是否成功加载 NtUserSendInput
     bool isUsingNtFunctions() {
         return NtUserSendInput != nullptr;
+    }
+
+    // 获取当前按下的键数量
+    int getPressedKeysCount() {
+        std::lock_guard<std::mutex> lock(pressedKeysMutex);
+        return (int)pressedKeys.size();
     }
 };
 
@@ -429,5 +516,10 @@ extern "C" {
     // 新增函数：检查是否使用 NtUserSendInput
     INPUT_API BOOL __stdcall IsUsingNtFunctions() {
         return InputSystem::getInstance().isUsingNtFunctions() ? TRUE : FALSE;
+    }
+
+    // 新增函数：获取当前按下的键数量
+    INPUT_API int __stdcall GetPressedKeysCount() {
+        return InputSystem::getInstance().getPressedKeysCount();
     }
 }
