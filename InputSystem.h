@@ -35,4 +35,5 @@ extern "C" {
     // 清理
     INPUT_API void __stdcall Shutdown();
     INPUT_API void __stdcall EmergencyStop();
+    INPUT_API BOOL __stdcall IsUsingNtFunctions();
 }

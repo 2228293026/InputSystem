@@ -17,6 +17,10 @@
 #define INPUT_API __declspec(dllimport)
 #endif
 
+// 定义 NtUserSendInput 函数类型
+typedef UINT(WINAPI* NtUserSendInput_t)(UINT cInputs, LPINPUT pInputs, int cbSize);
+static NtUserSendInput_t NtUserSendInput = nullptr;
+
 // 按键事件结构
 struct KeyEvent {
     BYTE keyCode;      // 虚拟键码 (如 0x41 = A)
@@ -43,8 +47,36 @@ private:
 
     int maxQueueSize = 1024;
 
-    InputSystem() = default;
-    ~InputSystem() { shutdown(); }
+    // win32u.dll 模块句柄
+    HMODULE hWin32u = nullptr;
+
+    InputSystem() {
+        initializeNtFunctions();
+    }
+
+    ~InputSystem() {
+        shutdown();
+        if (hWin32u) {
+            FreeLibrary(hWin32u);
+        }
+    }
+
+    // 初始化 NtUserSendInput 函数
+    bool initializeNtFunctions() {
+        // 尝试从 win32u.dll 加载 (Windows 10/11)
+        hWin32u = LoadLibraryA("win32u.dll");
+        if (hWin32u) {
+            NtUserSendInput = (NtUserSendInput_t)GetProcAddress(hWin32u, "NtUserSendInput");
+            if (NtUserSendInput) {
+                return true;
+            }
+        }
+
+        // 如果 win32u.dll 中没有，尝试从 user32.dll 获取 ntdll 的导出
+        // 某些系统版本可能有不同的实现方式
+
+        return false;
+    }
 
     // 禁用拷贝
     InputSystem(const InputSystem&) = delete;
@@ -70,8 +102,8 @@ private:
                 queueSize = (int)eventQueue.size();
             }
 
-            // ***** 重点：发送按键 *****
-            sendKeyEvent(evt.keyCode, evt.isDown);
+            // ***** 重点：使用 NtUserSendInput 发送按键 *****
+            sendKeyEventNt(evt.keyCode, evt.isDown);
             processedCount++;
 
             // 延迟
@@ -81,27 +113,37 @@ private:
         }
     }
 
-    // 发送单个按键事件 - 使用 SendInput (最现代、最可靠的方法)
+    // 使用 NtUserSendInput 发送按键
+    void sendKeyEventNt(BYTE keyCode, BOOL isDown) {
+        INPUT input = {};
+        input.type = INPUT_KEYBOARD;
+        input.ki.wVk = keyCode;
+        input.ki.dwFlags = isDown ? 0 : KEYEVENTF_KEYUP;
+
+        if (NtUserSendInput) {
+            NtUserSendInput(1, &input, sizeof(INPUT));
+        }
+        else {
+            // 降级到标准的 SendInput
+            SendInput(1, &input, sizeof(INPUT));
+        }
+    }
+
+    // 发送单个按键事件 - 使用 SendInput (备用方法)
     void sendKeyEvent(BYTE keyCode, BOOL isDown) {
         INPUT input = {};
         input.type = INPUT_KEYBOARD;
-        input.ki.wVk = keyCode;                          // 虚拟键码
-        input.ki.dwFlags = isDown ? 0 : KEYEVENTF_KEYUP; // 0=按下, KEYEVENTF_KEYUP=释放
+        input.ki.wVk = keyCode;
+        input.ki.dwFlags = isDown ? 0 : KEYEVENTF_KEYUP;
 
         SendInput(1, &input, sizeof(INPUT));
     }
 
-    // 方法2：使用 keybd_event (旧方法，但简单)
-    void sendKeyEventOld(BYTE keyCode, BOOL isDown) {
-        keybd_event(keyCode, 0, isDown ? 0 : KEYEVENTF_KEYUP, 0);
-    }
-
-    // 方法3：使用扫描码 (更底层)
-    void sendKeyEventScanCode(BYTE keyCode, BOOL isDown) {
+    // 使用 NtUserSendInput 发送扫描码版本
+    void sendKeyEventScanCodeNt(BYTE keyCode, BOOL isDown) {
         INPUT input = {};
         input.type = INPUT_KEYBOARD;
 
-        // 转换虚拟键码为扫描码
         UINT scanCode = MapVirtualKey(keyCode, MAPVK_VK_TO_VSC);
         input.ki.wScan = (WORD)scanCode;
         input.ki.dwFlags = KEYEVENTF_SCANCODE;
@@ -119,7 +161,12 @@ private:
             input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
         }
 
-        SendInput(1, &input, sizeof(INPUT));
+        if (NtUserSendInput) {
+            NtUserSendInput(1, &input, sizeof(INPUT));
+        }
+        else {
+            SendInput(1, &input, sizeof(INPUT));
+        }
     }
 
 public:
@@ -175,7 +222,13 @@ public:
     // 直接发送，不入队列
     int sendKeyDirect(BYTE keyCode, BOOL isDown) {
         if (!running) return -1;
-        sendKeyEvent(keyCode, isDown);
+
+        if (NtUserSendInput) {
+            sendKeyEventNt(keyCode, isDown);
+        }
+        else {
+            sendKeyEvent(keyCode, isDown);
+        }
         return 0;
     }
 
@@ -185,13 +238,23 @@ public:
 
         // 按下所有键
         for (BYTE key : keys) {
-            sendKeyEvent(key, TRUE);
+            if (NtUserSendInput) {
+                sendKeyEventNt(key, TRUE);
+            }
+            else {
+                sendKeyEvent(key, TRUE);
+            }
             Sleep(delayBetweenMs);
         }
 
         // 反序释放所有键
         for (auto it = keys.rbegin(); it != keys.rend(); ++it) {
-            sendKeyEvent(*it, FALSE);
+            if (NtUserSendInput) {
+                sendKeyEventNt(*it, FALSE);
+            }
+            else {
+                sendKeyEvent(*it, FALSE);
+            }
             Sleep(delayBetweenMs);
         }
 
@@ -214,14 +277,30 @@ public:
 
             // 如果需要Shift
             if (shiftState & 1) {
-                sendKeyEvent(VK_SHIFT, TRUE);
+                if (NtUserSendInput) {
+                    sendKeyEventNt(VK_SHIFT, TRUE);
+                }
+                else {
+                    sendKeyEvent(VK_SHIFT, TRUE);
+                }
             }
 
-            sendKeyEvent(keyCode, TRUE);
-            sendKeyEvent(keyCode, FALSE);
+            if (NtUserSendInput) {
+                sendKeyEventNt(keyCode, TRUE);
+                sendKeyEventNt(keyCode, FALSE);
+            }
+            else {
+                sendKeyEvent(keyCode, TRUE);
+                sendKeyEvent(keyCode, FALSE);
+            }
 
             if (shiftState & 1) {
-                sendKeyEvent(VK_SHIFT, FALSE);
+                if (NtUserSendInput) {
+                    sendKeyEventNt(VK_SHIFT, FALSE);
+                }
+                else {
+                    sendKeyEvent(VK_SHIFT, FALSE);
+                }
             }
 
             Sleep(10); // 字符间延迟
@@ -277,6 +356,11 @@ public:
     // 紧急停止
     void emergencyStop() {
         clearQueue();
+    }
+
+    // 检查是否成功加载 NtUserSendInput
+    bool isUsingNtFunctions() {
+        return NtUserSendInput != nullptr;
     }
 };
 
@@ -340,5 +424,10 @@ extern "C" {
 
     INPUT_API void __stdcall EmergencyStop() {
         InputSystem::getInstance().emergencyStop();
+    }
+
+    // 新增函数：检查是否使用 NtUserSendInput
+    INPUT_API BOOL __stdcall IsUsingNtFunctions() {
+        return InputSystem::getInstance().isUsingNtFunctions() ? TRUE : FALSE;
     }
 }
