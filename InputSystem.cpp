@@ -11,8 +11,6 @@
 #include <array>
 
 #pragma comment(lib, "user32.lib")
-
-#define INPUTSYSTEM_EXPORTS
 #include "InputSystem.h"
 
 // ─────────────────────────────────────────────
@@ -364,7 +362,7 @@ public:
 // ─────────────────────────────────────────────
 //  DLL 入口
 // ─────────────────────────────────────────────
-static BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
+BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
     switch (reason) {
     case DLL_PROCESS_ATTACH: DisableThreadLibraryCalls(hModule); break;
     case DLL_PROCESS_DETACH: InputSystem::getInstance().shutdown(); break;
