@@ -358,7 +358,7 @@ public:
 // ─────────────────────────────────────────────
 //  DLL 入口
 // ─────────────────────────────────────────────
-BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
+static BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
     switch (reason) {
     case DLL_PROCESS_ATTACH:
         DisableThreadLibraryCalls(hModule);
