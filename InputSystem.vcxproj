@@ -141,6 +141,7 @@
   <ItemGroup>
     <ClInclude Include="framework.h" />
     <ClInclude Include="InputSystem.h" />
+    <ClInclude Include="resource.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="InputSystem.cpp" />
@@ -148,6 +149,9 @@
   <ItemGroup>
     <None Include="cpp.hint" />
     <None Include="InputSystem.def" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="InputSystem.rc" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
